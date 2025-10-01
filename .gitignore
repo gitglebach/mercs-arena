@@ -10,3 +10,11 @@ target/
 *.iml
 # build
 /out/
+
+# Maven
+/target/
+# IDE
+/.idea/
+*.iml
+# build
+/out/

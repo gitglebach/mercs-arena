@@ -1,12 +1,16 @@
 import java.util.*;
 
-// ===================== МОДЕЛЬ СОХРАНЕНИЯ =====================
+// ===================== МОДЕЛИ ДЛЯ СОХРАНЕНИЙ =====================
 class SaveGame {
     Warrior[] teamA;
     Warrior[] teamB;
     int round;
     int logLevel;
     boolean color;
+
+    // v2: метаданные слота
+    String saveName;
+    long savedAtEpochMillis;
 
     SaveGame() {}
     SaveGame(Warrior[] teamA, Warrior[] teamB, int round, int logLevel, boolean color) {
@@ -15,6 +19,33 @@ class SaveGame {
         this.round = round;
         this.logLevel = logLevel;
         this.color = color;
+    }
+}
+
+class SaveMeta {
+    String id;         // save-001
+    String saveName;   // имя слота
+    long savedAt;      // millis
+    String path;       // путь к json-файлу
+
+    SaveMeta() {}
+    SaveMeta(String id, String saveName, long savedAt, String path) {
+        this.id = id; this.saveName = saveName; this.savedAt = savedAt; this.path = path;
+    }
+}
+
+// ===================== КАМПАНИЯ: СОСТОЯНИЕ =====================
+class CampaignState {
+    int day = 1;
+    int gold = 100;
+    int difficulty = 1; // 1-легко, 2-норма, 3-сложно
+    // максимум 5 бойцов в активном отряде
+    Warrior[] roster = new Warrior[5];
+
+    int aliveCount() {
+        int c = 0;
+        for (Warrior w : roster) if (w != null && w.hp > 0) c++;
+        return c;
     }
 }
 
@@ -86,12 +117,12 @@ enum Weapon {
 // ===================== MAIN =====================
 public class Main {
 
-    // Баланс/режимы
+    // --- Баланс / режимы
     static final int    LOW_HP_THRESHOLD    = 10;
     static final double TEAM_HEAL_CHANCE    = 0.50;
     static final boolean SHOW_ROUND_SUMMARY = true;
 
-    // Логгер
+    // --- Логгер
     static final int BRIEF = 0, NORMAL = 1, VERBOSE = 2;
     static int LOG_LEVEL = NORMAL;
     static boolean COLOR = true;
@@ -101,18 +132,41 @@ public class Main {
     public static void log(int need, String msg) { if (LOG_LEVEL >= need) System.out.println(msg); }
     public static String c(String color, String s){ return COLOR ? color + s + RESET : s; }
 
+    // --- Пути для слотов
+    static final String SAVES_DIR = "saves";
+    static final String INDEX_PATH = SAVES_DIR + "/index.json";
+
     public static void main(String[] args) {
         Scanner in = new Scanner(System.in);
 
         configureLogging(in);
 
-        System.out.println("\nВыберите режим боя:");
+        System.out.println("\nВыберите режим:");
         System.out.println(" 1) Дуэль (1 на 1)");
         System.out.println(" 2) Командная битва");
-        System.out.println(" 3) Загрузить командную битву из JSON");
-        int mode = readInt(in, "Ваш выбор (1-3): ", 1, 3);
+        System.out.println(" 3) Загрузить из JSON (старый способ)");
+        System.out.println(" 4) Загрузить из списка сохранений (СЛОТЫ)");
+        System.out.println(" 5) Кампания (WIP)");
+        int mode = readInt(in, "Ваш выбор (1-5): ", 1, 5);
 
-        if (mode == 3) {
+        if (mode == 5) {
+            runCampaign(in);
+            in.close();
+            return;
+        } else if (mode == 4) {
+            var metas = listSavesPrint();
+            if (!metas.isEmpty()) {
+                int num = readInt(in, "Введите номер слота для загрузки: ", 1, metas.size());
+                SaveGame sg = loadSaveByNumber(num);
+                if (sg != null) {
+                    LOG_LEVEL = sg.logLevel;
+                    COLOR = sg.color;
+                    runTeamBattleLoaded(in, sg);
+                }
+            }
+            in.close();
+            return;
+        } else if (mode == 3) {
             System.out.print("Путь к сохранению (по умолчанию save.json): ");
             String p = in.nextLine().trim();
             if (p.isEmpty()) p = "save.json";
@@ -162,7 +216,184 @@ public class Main {
         in.close();
     }
 
-    // ===================== КОМАНДНАЯ БИТВА =====================
+    // ===================== КОМПАНИЯ: СКЕЛЕТ ЦИКЛА =====================
+    static void runCampaign(Scanner in) {
+        System.out.println("\n=== КАМПАНИЯ (WIP) ===");
+
+        CampaignState cs = new CampaignState();
+
+        // стартовый набор: 2 бойца
+        System.out.println("Соберём стартовый отряд (2 бойца).");
+        for (int i = 0; i < 2; i++) {
+            System.out.println("Стартовый боец #" + (i + 1) + ": 1) Landsknecht  2) Swiss  3) Случайный  4) Список");
+            int ch = readInt(in, "Ваш выбор (1-4): ", 1, 4);
+            cs.roster[i] = createWarrior(ch, in);
+            cs.roster[i].teamTag = "[A]"; // твой отряд — команда A
+        }
+
+        boolean running = true;
+        while (running) {
+            System.out.println("\n=== День " + cs.day + " | 💰 Gold: " + cs.gold + " | Отряд живых: " + cs.aliveCount() + " ===");
+            System.out.println(" 1) Лагерь / Магазин");
+            System.out.println(" 2) Поход");
+            System.out.println(" 3) Следующий бой");
+            System.out.println(" 0) Выйти в главное меню");
+            int pick = readInt(in, "Ваш выбор: ", 0, 3);
+
+            if (pick == 0) {
+                System.out.println("Выход из кампании...");
+                break;
+            } else if (pick == 1) {
+                campMenu(in, cs);
+            } else if (pick == 2) {
+                doExpedition(in, cs);
+            } else if (pick == 3) {
+                doNextBattle(in, cs);
+            }
+        }
+        System.out.println("Кампания завершена.");
+    }
+
+    static void campMenu(Scanner in, CampaignState cs) {
+        System.out.println("\n— ЛАГЕРЬ / МАГАЗИН —");
+        System.out.println(" 1) Купить зелье (15 gold, +1 к любому живому бойцу)");
+        System.out.println(" 2) Просмотр отряда");
+        System.out.println(" 0) Назад");
+        int pick = readInt(in, "Ваш выбор: ", 0, 2);
+
+        if (pick == 1) {
+            if (cs.gold < 15) { System.out.println("Недостаточно золота."); return; }
+            int idx = selectAliveWarrior(in, cs.roster, "Кому дать зелье?");
+            if (idx == -1) return;
+            cs.roster[idx].potions += 1;
+            cs.gold -= 15;
+            System.out.println("Куплено зелье для " + cs.roster[idx].label() + ". Осталось золота: " + cs.gold);
+        } else if (pick == 2) {
+            printTeam("Ваш отряд", cs.roster);
+        }
+    }
+
+    static void doExpedition(Scanner in, CampaignState cs) {
+        System.out.println("\n— ПОХОД —");
+        double roll = Math.random();
+        if (roll < 0.5) {
+            int found = 10 + (int)(Math.random() * 11); // 10..20
+            cs.gold += found;
+            System.out.println("Найдены припасы и контракты: +" + found + " gold. Теперь: " + cs.gold);
+        } else {
+            System.out.println("Дороги пустынны. Без происшествий.");
+        }
+        cs.day += 1;
+    }
+
+    static void doNextBattle(Scanner in, CampaignState cs) {
+        System.out.println("\n— СЛЕДУЮЩИЙ БОЙ —");
+
+        Warrior[] teamA = buildActiveTeam(cs.roster);
+        if (teamA.length == 0) {
+            System.out.println("Все бойцы выбиты. Нечем сражаться.");
+            return;
+        }
+
+        Warrior[] teamB = new Warrior[teamA.length];
+        for (int i = 0; i < teamB.length; i++) {
+            teamB[i] = Warrior.randomWarrior();
+            teamB[i].teamTag = "[B]";
+        }
+
+        printTeam("Команда A (ваш отряд)", teamA);
+        printTeam("Команда B (противник)", teamB);
+
+        int round = 1;
+        while (teamAlive(teamA) && teamAlive(teamB)) {
+            playTeamRoundRandom(round, teamA, teamB);
+            if (SHOW_ROUND_SUMMARY) {
+                printTeam("Сводка: Команда A", teamA);
+                printTeam("Сводка: Команда B", teamB);
+                log(BRIEF, teamMiniSummary(teamA, teamB));
+            }
+            round++;
+        }
+
+        boolean win = teamAlive(teamA);
+        System.out.println(win ? "🏆 Победа!" : "☠️ Поражение...");
+
+        if (win) {
+            int reward = 20 + (int)(Math.random() * 16); // 20..35
+            cs.gold += reward;
+            System.out.println("Награда: +" + reward + " gold. Всего: " + cs.gold);
+        } else {
+            int loss = 10 + (int)(Math.random() * 11); // 10..20
+            cs.gold = Math.max(0, cs.gold - loss);
+            System.out.println("Потери: -" + loss + " gold. Осталось: " + cs.gold);
+        }
+
+        syncBackToRoster(cs.roster, teamA);
+        cs.day += 1;
+    }
+
+    static int selectAliveWarrior(Scanner in, Warrior[] team, String prompt) {
+        List<Integer> aliveIdx = new ArrayList<>();
+        System.out.println(prompt);
+        for (int i = 0; i < team.length; i++) {
+            Warrior w = team[i];
+            if (w != null && w.hp > 0) {
+                aliveIdx.add(i);
+                System.out.println(" " + (aliveIdx.size()) + ") " + w.label() + " (hp=" + w.hp + ")");
+            }
+        }
+        if (aliveIdx.isEmpty()) { System.out.println("Живых бойцов нет."); return -1; }
+        int pick = readInt(in, "Номер: ", 1, aliveIdx.size());
+        return aliveIdx.get(pick - 1);
+    }
+
+    static Warrior[] buildActiveTeam(Warrior[] roster) {
+        List<Warrior> list = new ArrayList<>();
+        for (Warrior w : roster) {
+            if (w != null && w.hp > 0) {
+                Warrior copy = cloneWarriorForBattle(w);
+                copy.teamTag = "[A]";
+                list.add(copy);
+            }
+        }
+        return list.toArray(new Warrior[0]);
+    }
+
+    static Warrior cloneWarriorForBattle(Warrior w) {
+        Warrior c = new Warrior(w.name, w.hp, w.attack);
+        c.maxHp = w.maxHp;
+        c.potions = w.potions;
+        c.stunned = false;
+        c.fatigue = 0;
+        c.armor = w.armor;
+        c.pierce = w.pierce;
+        c.minDamage = w.minDamage;
+        c.missChance = w.missChance;
+        c.blockChance = w.blockChance;
+        c.dodgeChance = w.dodgeChance;
+        c.critChance = w.critChance;
+        c.stunOnCritChance = w.stunOnCritChance;
+        c.role = w.role;
+        c.weapon = w.weapon;
+        return c;
+    }
+
+    static void syncBackToRoster(Warrior[] roster, Warrior[] battleTeamA) {
+        for (int i = 0; i < roster.length; i++) {
+            Warrior base = roster[i];
+            if (base == null) continue;
+            Warrior match = null;
+            for (Warrior bw : battleTeamA) {
+                if (bw != null && bw.name.equals(base.name)) { match = bw; break; }
+            }
+            if (match != null) {
+                base.hp = Math.max(0, Math.min(base.maxHp, match.hp));
+                base.potions = match.potions;
+            }
+        }
+    }
+
+    // ===================== КОМАНДНАЯ БИТВА (как было) =====================
     static void runTeamBattle(Scanner in) {
         System.out.println("\n[Командная битва] Старт.");
 
@@ -188,10 +419,13 @@ public class Main {
         printTeam("Команда A", teamA);
         printTeam("Команда B", teamB);
 
-        // Предложить сохранить старт боя
-        System.out.print("Сохранить старт боя в JSON? (y/n, default n): ");
+        System.out.print("Сохранить старт боя в СЛОТ? (y/n, default n): ");
         String ansSave = in.nextLine().trim().toLowerCase();
-        if (ansSave.equals("y")) saveGameJson("save.json", teamA, teamB, 1);
+        if (ansSave.equals("y")) {
+            System.out.print("Имя сохранения (например, \"Старт боя\"): ");
+            String nm = in.nextLine().trim();
+            saveGameToNewSlot(nm, teamA, teamB, 1);
+        }
 
         int round = 1;
         while (teamAlive(teamA) && teamAlive(teamB)) {
@@ -203,9 +437,13 @@ public class Main {
                 log(BRIEF, teamMiniSummary(teamA, teamB));
             }
 
-            System.out.print("[S] сохранить и продолжить, [Enter] просто продолжить: ");
+            System.out.print("[S] сохранить в СЛОТ, [Enter] продолжить: ");
             String hot = in.nextLine().trim().toLowerCase();
-            if (hot.equals("s")) saveGameJson("save.json", teamA, teamB, round + 1);
+            if (hot.equals("s")) {
+                System.out.print("Имя сохранения (Enter — по умолчанию): ");
+                String nm = in.nextLine().trim();
+                saveGameToNewSlot(nm, teamA, teamB, round + 1);
+            }
 
             round++;
         }
@@ -235,9 +473,13 @@ public class Main {
                 log(BRIEF, teamMiniSummary(teamA, teamB));
             }
 
-            System.out.print("[S] сохранить и продолжить, [Enter] просто продолжить: ");
+            System.out.print("[S] сохранить в СЛОТ, [Enter] продолжить: ");
             String hot = in.nextLine().trim().toLowerCase();
-            if (hot.equals("s")) saveGameJson("save.json", teamA, teamB, round + 1);
+            if (hot.equals("s")) {
+                System.out.print("Имя сохранения (Enter — по умолчанию): ");
+                String nm = in.nextLine().trim();
+                saveGameToNewSlot(nm, teamA, teamB, round + 1);
+            }
 
             round++;
         }
@@ -276,7 +518,7 @@ public class Main {
         if (target != null) attacker.attack(target);
     }
 
-    // ===================== SAVE / LOAD JSON =====================
+    // ===================== JSON: БЫСТРЫЕ СЕЙВЫ (оставили) =====================
     static void saveGameJson(String path, Warrior[] teamA, Warrior[] teamB, int round) {
         try {
             com.google.gson.Gson gson = new com.google.gson.GsonBuilder().setPrettyPrinting().create();
@@ -297,6 +539,117 @@ public class Main {
             return sg;
         } catch (Exception e) {
             System.out.println("❌ Ошибка загрузки: " + e.getMessage());
+            return null;
+        }
+    }
+
+    // ===================== СЛОТЫ: ДИРЕКТОРИЯ, ИНДЕКС, ФОРМАТ ВРЕМЕНИ =====================
+    static void ensureSavesDir() {
+        try { java.nio.file.Files.createDirectories(java.nio.file.Path.of(SAVES_DIR)); } catch (Exception ignored) {}
+    }
+
+    static java.util.List<SaveMeta> readSaveIndex() {
+        ensureSavesDir();
+        java.nio.file.Path p = java.nio.file.Path.of(INDEX_PATH);
+        if (!java.nio.file.Files.exists(p)) return new java.util.ArrayList<>();
+        try {
+            String json = java.nio.file.Files.readString(p);
+            com.google.gson.Gson gson = new com.google.gson.Gson();
+            SaveMeta[] arr = gson.fromJson(json, SaveMeta[].class);
+            java.util.List<SaveMeta> list = new java.util.ArrayList<>();
+            if (arr != null) java.util.Collections.addAll(list, arr);
+            list.sort((a,b) -> Long.compare(b.savedAt, a.savedAt));
+            return list;
+        } catch (Exception e) {
+            System.out.println("⚠️ Не удалось прочитать index.json: " + e.getMessage());
+            return new java.util.ArrayList<>();
+        }
+    }
+
+    static void writeSaveIndex(java.util.List<SaveMeta> metas) {
+        ensureSavesDir();
+        try {
+            com.google.gson.Gson gson = new com.google.gson.GsonBuilder().setPrettyPrinting().create();
+            String json = gson.toJson(metas);
+            java.nio.file.Files.writeString(java.nio.file.Path.of(INDEX_PATH), json);
+        } catch (Exception e) {
+            System.out.println("⚠️ Не удалось записать index.json: " + e.getMessage());
+        }
+    }
+
+    static String nextSaveId(java.util.List<SaveMeta> metas) {
+        int max = 0;
+        for (SaveMeta m : metas) {
+            if (m.id != null && m.id.startsWith("save-")) {
+                try {
+                    int n = Integer.parseInt(m.id.substring(5));
+                    if (n > max) max = n;
+                } catch (NumberFormatException ignored) {}
+            }
+        }
+        return String.format("save-%03d", max + 1);
+    }
+
+    static String fmtTime(long millis) {
+        java.time.Instant inst = java.time.Instant.ofEpochMilli(millis);
+        java.time.ZoneId tz = java.time.ZoneId.systemDefault();
+        java.time.ZonedDateTime dt = java.time.ZonedDateTime.ofInstant(inst, tz);
+        return dt.toLocalDate() + " " + dt.toLocalTime().withNano(0);
+    }
+
+    // ===================== СЛОТЫ: СОХРАНИТЬ/СПИСОК/ЗАГРУЗИТЬ =====================
+    static void saveGameToNewSlot(String saveName, Warrior[] teamA, Warrior[] teamB, int round) {
+        ensureSavesDir();
+        java.util.List<SaveMeta> metas = readSaveIndex();
+        String id = nextSaveId(metas);
+        String path = SAVES_DIR + "/" + id + ".json";
+        long now = System.currentTimeMillis();
+
+        SaveGame sg = new SaveGame(teamA, teamB, round, LOG_LEVEL, COLOR);
+        sg.saveName = (saveName == null || saveName.isBlank()) ? id : saveName.trim();
+        sg.savedAtEpochMillis = now;
+
+        try {
+            com.google.gson.Gson gson = new com.google.gson.GsonBuilder().setPrettyPrinting().create();
+            java.nio.file.Files.writeString(java.nio.file.Path.of(path), gson.toJson(sg));
+            metas.add(new SaveMeta(id, sg.saveName, now, path));
+            metas.sort((a,b) -> Long.compare(b.savedAt, a.savedAt));
+            writeSaveIndex(metas);
+            System.out.println("✅ Сохранено в слот: " + id + " — \"" + sg.saveName + "\" (" + fmtTime(now) + ")");
+        } catch (Exception e) {
+            System.out.println("❌ Ошибка сохранения слота: " + e.getMessage());
+        }
+    }
+
+    static java.util.List<SaveMeta> listSavesPrint() {
+        java.util.List<SaveMeta> metas = readSaveIndex();
+        if (metas.isEmpty()) {
+            System.out.println("\nСохранения отсутствуют.");
+            return metas;
+        }
+        System.out.println("\nСписок сохранений:");
+        for (int i = 0; i < metas.size(); i++) {
+            SaveMeta m = metas.get(i);
+            System.out.println(" " + (i+1) + ") [" + m.id + "] " + m.saveName + " · " + fmtTime(m.savedAt) + " · " + m.path);
+        }
+        return metas;
+    }
+
+    static SaveGame loadSaveByNumber(int number) {
+        java.util.List<SaveMeta> metas = readSaveIndex();
+        if (number < 1 || number > metas.size()) {
+            System.out.println("Неверный номер слота.");
+            return null;
+        }
+        SaveMeta m = metas.get(number - 1);
+        try {
+            String json = java.nio.file.Files.readString(java.nio.file.Path.of(m.path));
+            com.google.gson.Gson gson = new com.google.gson.Gson();
+            SaveGame sg = gson.fromJson(json, SaveGame.class);
+            System.out.println("✅ Загружено: [" + m.id + "] \"" + sg.saveName + "\" (" + fmtTime(sg.savedAtEpochMillis) + ")");
+            return sg;
+        } catch (Exception e) {
+            System.out.println("❌ Ошибка загрузки из слота: " + e.getMessage());
             return null;
         }
     }
