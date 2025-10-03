@@ -1,0 +1,14 @@
+[
+  {
+    "id": "save-002",
+    "saveName": "проверка сохранения 2",
+    "savedAt": 1759418920290,
+    "path": "saves/save-002.json"
+  },
+  {
+    "id": "save-001",
+    "saveName": "Проверка сохранения",
+    "savedAt": 1759418776124,
+    "path": "saves/save-001.json"
+  }
+]

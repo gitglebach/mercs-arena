@@ -12,6 +12,9 @@ class SaveGame {
     String saveName;
     long savedAtEpochMillis;
 
+    // v3: полная кампания (если слот про кампанию)
+    CampaignState campaign;
+
     SaveGame() {}
     SaveGame(Warrior[] teamA, Warrior[] teamB, int round, int logLevel, boolean color) {
         this.teamA = teamA;
@@ -154,7 +157,7 @@ public class Main {
             in.close();
             return;
         } else if (mode == 4) {
-            var metas = listSavesPrint();
+            List<SaveMeta> metas = listSavesPrint();
             if (!metas.isEmpty()) {
                 int num = readInt(in, "Введите номер слота для загрузки: ", 1, metas.size());
                 SaveGame sg = loadSaveByNumber(num);
@@ -216,7 +219,7 @@ public class Main {
         in.close();
     }
 
-    // ===================== КОМПАНИЯ: СКЕЛЕТ ЦИКЛА =====================
+    // ===================== КАМПАНИЯ: СКЕЛЕТ ЦИКЛА =====================
     static void runCampaign(Scanner in) {
         System.out.println("\n=== КАМПАНИЯ (WIP) ===");
 
@@ -237,8 +240,10 @@ public class Main {
             System.out.println(" 1) Лагерь / Магазин");
             System.out.println(" 2) Поход");
             System.out.println(" 3) Следующий бой");
+            System.out.println(" 4) Сохранить кампанию (в слот)");
+            System.out.println(" 5) Загрузить кампанию (из списка слотов)");
             System.out.println(" 0) Выйти в главное меню");
-            int pick = readInt(in, "Ваш выбор: ", 0, 3);
+            int pick = readInt(in, "Ваш выбор: ", 0, 5);
 
             if (pick == 0) {
                 System.out.println("Выход из кампании...");
@@ -249,6 +254,19 @@ public class Main {
                 doExpedition(in, cs);
             } else if (pick == 3) {
                 doNextBattle(in, cs);
+            } else if (pick == 4) {
+                System.out.print("Имя сохранения кампании (Enter — по умолчанию): ");
+                String nm = in.nextLine().trim();
+                saveCampaignToNewSlot(nm, cs);
+            } else if (pick == 5) {
+                List<SaveMeta> metas = listSavesPrint();
+                if (!metas.isEmpty()) {
+                    int num = readInt(in, "Номер слота: ", 1, metas.size());
+                    CampaignState loaded = loadCampaignByNumber(num);
+                    if (loaded != null) {
+                        cs = loaded; // заменить текущее состояние кампании на загруженное
+                    }
+                }
             }
         }
         System.out.println("Кампания завершена.");
@@ -269,7 +287,7 @@ public class Main {
             cs.gold -= 15;
             System.out.println("Куплено зелье для " + cs.roster[idx].label() + ". Осталось золота: " + cs.gold);
         } else if (pick == 2) {
-            printTeam("Ваш отряд", cs.roster);
+            printTeam("Ваш отряд", cs.roster, true); // показываем и пустые слоты
         }
     }
 
@@ -393,7 +411,7 @@ public class Main {
         }
     }
 
-    // ===================== КОМАНДНАЯ БИТВА (как было) =====================
+    // ===================== КОМАНДНАЯ БИТВА =====================
     static void runTeamBattle(Scanner in) {
         System.out.println("\n[Командная битва] Старт.");
 
@@ -548,25 +566,25 @@ public class Main {
         try { java.nio.file.Files.createDirectories(java.nio.file.Path.of(SAVES_DIR)); } catch (Exception ignored) {}
     }
 
-    static java.util.List<SaveMeta> readSaveIndex() {
+    static List<SaveMeta> readSaveIndex() {
         ensureSavesDir();
         java.nio.file.Path p = java.nio.file.Path.of(INDEX_PATH);
-        if (!java.nio.file.Files.exists(p)) return new java.util.ArrayList<>();
+        if (!java.nio.file.Files.exists(p)) return new ArrayList<>();
         try {
             String json = java.nio.file.Files.readString(p);
             com.google.gson.Gson gson = new com.google.gson.Gson();
             SaveMeta[] arr = gson.fromJson(json, SaveMeta[].class);
-            java.util.List<SaveMeta> list = new java.util.ArrayList<>();
-            if (arr != null) java.util.Collections.addAll(list, arr);
+            List<SaveMeta> list = new ArrayList<>();
+            if (arr != null) Collections.addAll(list, arr);
             list.sort((a,b) -> Long.compare(b.savedAt, a.savedAt));
             return list;
         } catch (Exception e) {
             System.out.println("⚠️ Не удалось прочитать index.json: " + e.getMessage());
-            return new java.util.ArrayList<>();
+            return new ArrayList<>();
         }
     }
 
-    static void writeSaveIndex(java.util.List<SaveMeta> metas) {
+    static void writeSaveIndex(List<SaveMeta> metas) {
         ensureSavesDir();
         try {
             com.google.gson.Gson gson = new com.google.gson.GsonBuilder().setPrettyPrinting().create();
@@ -577,7 +595,7 @@ public class Main {
         }
     }
 
-    static String nextSaveId(java.util.List<SaveMeta> metas) {
+    static String nextSaveId(List<SaveMeta> metas) {
         int max = 0;
         for (SaveMeta m : metas) {
             if (m.id != null && m.id.startsWith("save-")) {
@@ -597,10 +615,10 @@ public class Main {
         return dt.toLocalDate() + " " + dt.toLocalTime().withNano(0);
     }
 
-    // ===================== СЛОТЫ: СОХРАНИТЬ/СПИСОК/ЗАГРУЗИТЬ =====================
+    // ===================== СЛОТЫ: СОХР/СПИСОК/ЗАГР — БОЙ =====================
     static void saveGameToNewSlot(String saveName, Warrior[] teamA, Warrior[] teamB, int round) {
         ensureSavesDir();
-        java.util.List<SaveMeta> metas = readSaveIndex();
+        List<SaveMeta> metas = readSaveIndex();
         String id = nextSaveId(metas);
         String path = SAVES_DIR + "/" + id + ".json";
         long now = System.currentTimeMillis();
@@ -621,8 +639,8 @@ public class Main {
         }
     }
 
-    static java.util.List<SaveMeta> listSavesPrint() {
-        java.util.List<SaveMeta> metas = readSaveIndex();
+    static List<SaveMeta> listSavesPrint() {
+        List<SaveMeta> metas = readSaveIndex();
         if (metas.isEmpty()) {
             System.out.println("\nСохранения отсутствуют.");
             return metas;
@@ -636,7 +654,7 @@ public class Main {
     }
 
     static SaveGame loadSaveByNumber(int number) {
-        java.util.List<SaveMeta> metas = readSaveIndex();
+        List<SaveMeta> metas = readSaveIndex();
         if (number < 1 || number > metas.size()) {
             System.out.println("Неверный номер слота.");
             return null;
@@ -650,6 +668,55 @@ public class Main {
             return sg;
         } catch (Exception e) {
             System.out.println("❌ Ошибка загрузки из слота: " + e.getMessage());
+            return null;
+        }
+    }
+
+    // ===================== СЛОТЫ: СОХР/ЗАГР — КАМПАНИЯ =====================
+    static void saveCampaignToNewSlot(String saveName, CampaignState cs) {
+        ensureSavesDir();
+        List<SaveMeta> metas = readSaveIndex();
+        String id = nextSaveId(metas);
+        String path = SAVES_DIR + "/" + id + ".json";
+        long now = System.currentTimeMillis();
+
+        SaveGame sg = new SaveGame(null, null, 0, LOG_LEVEL, COLOR);
+        sg.campaign = cs;
+        sg.saveName = (saveName == null || saveName.isBlank()) ? id : saveName.trim();
+        sg.savedAtEpochMillis = now;
+
+        try {
+            com.google.gson.Gson gson = new com.google.gson.GsonBuilder().setPrettyPrinting().create();
+            java.nio.file.Files.writeString(java.nio.file.Path.of(path), gson.toJson(sg));
+            metas.add(new SaveMeta(id, sg.saveName, now, path));
+            metas.sort((a,b) -> Long.compare(b.savedAt, a.savedAt));
+            writeSaveIndex(metas);
+            System.out.println("✅ Кампания сохранена в слот: " + id + " — \"" + sg.saveName + "\" (" + fmtTime(now) + ")");
+        } catch (Exception e) {
+            System.out.println("❌ Ошибка сохранения кампании: " + e.getMessage());
+        }
+    }
+
+    static CampaignState loadCampaignByNumber(int number) {
+        List<SaveMeta> metas = readSaveIndex();
+        if (number < 1 || number > metas.size()) {
+            System.out.println("Неверный номер слота.");
+            return null;
+        }
+        SaveMeta m = metas.get(number - 1);
+        try {
+            String json = java.nio.file.Files.readString(java.nio.file.Path.of(m.path));
+            com.google.gson.Gson gson = new com.google.gson.Gson();
+            SaveGame sg = gson.fromJson(json, SaveGame.class);
+            if (sg.campaign == null) {
+                System.out.println("⚠️ В выбранном слоте нет кампании (это сейв боя).");
+                return null;
+            }
+            for (Warrior w : sg.campaign.roster) if (w != null) w.teamTag = "[A]";
+            System.out.println("✅ Кампания загружена: [" + m.id + "] \"" + sg.saveName + "\" (" + fmtTime(sg.savedAtEpochMillis) + ")");
+            return sg.campaign;
+        } catch (Exception e) {
+            System.out.println("❌ Ошибка загрузки кампании: " + e.getMessage());
             return null;
         }
     }
@@ -694,9 +761,18 @@ public class Main {
     }
 
     static void printTeam(String title, Warrior[] team) {
+        printTeam(title, team, false);
+    }
+
+    // безопасно обрабатывает null-ячейки; по флагу может показывать пустые слоты
+    static void printTeam(String title, Warrior[] team, boolean showEmptySlots) {
         System.out.println("\n" + title + ":");
         for (int i = 0; i < team.length; i++) {
             Warrior w = team[i];
+            if (w == null) {
+                if (showEmptySlots) System.out.println((i + 1) + ") [пусто]");
+                continue;
+            }
             String nm = String.format("%-14s", w.label());
             System.out.println((i + 1) + ") " + nm
                     + " (hp=" + w.hp + ", atk=" + w.attack

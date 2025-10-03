@@ -1,0 +1,57 @@
+{
+  "round": 0,
+  "logLevel": 2,
+  "color": true,
+  "saveName": "проверка сохранения 2",
+  "savedAtEpochMillis": 1759418920290,
+  "campaign": {
+    "day": 2,
+    "gold": 125,
+    "difficulty": 1,
+    "roster": [
+      {
+        "name": "Landsknecht",
+        "teamTag": "[A]",
+        "hp": 11,
+        "maxHp": 30,
+        "attack": 7,
+        "potions": 0,
+        "stunned": false,
+        "fatigue": 0,
+        "armor": 3,
+        "pierce": 0,
+        "minDamage": 1,
+        "missChance": 0.18000000000000002,
+        "blockChance": 0.2,
+        "dodgeChance": 0.1,
+        "critChance": 0.15000000000000002,
+        "stunOnCritChance": 0.25,
+        "role": "TANK",
+        "weapon": "ZWEIHANDER"
+      },
+      {
+        "name": "Swiss",
+        "teamTag": "[A]",
+        "hp": 5,
+        "maxHp": 25,
+        "attack": 7,
+        "potions": 0,
+        "stunned": false,
+        "fatigue": 0,
+        "armor": 2,
+        "pierce": 0,
+        "minDamage": 1,
+        "missChance": 0.16000000000000003,
+        "blockChance": 0.2,
+        "dodgeChance": 0.1,
+        "critChance": 0.1,
+        "stunOnCritChance": 0.25,
+        "role": "TANK",
+        "weapon": "PIKE"
+      },
+      null,
+      null,
+      null
+    ]
+  }
+}
