@@ -40,6 +40,22 @@ class SaveMeta {
 // ===================== ВАЛЮТА =====================
 enum Currency { GULDEN, THALER, DUCAT }
 
+// ===================== КАРТА/УЗЛЫ =====================
+enum NodeType { BATTLE, MARKET, EVENT }
+
+class MapNode {
+    int id;
+    NodeType type;
+    String desc;
+    Integer next1;   // индекс следующего узла (обязателен, кроме последнего)
+    Integer next2;   // опциональная развилка
+
+    MapNode() {}
+    MapNode(int id, NodeType type, String desc) {
+        this.id = id; this.type = type; this.desc = desc;
+    }
+}
+
 // ===================== КАМПАНИЯ: СОСТОЯНИЕ =====================
 class CampaignState {
     int day = 1;
@@ -67,6 +83,10 @@ class CampaignState {
 
     // Фокус-метка от ротмистра на следующий бой
     boolean focusTarget = false;
+
+    // КАРТА
+    List<MapNode> path = null;
+    int currentNodeIndex = 0;
 
     int aliveCount() {
         int c = 0;
@@ -154,6 +174,8 @@ enum Weapon {
 
 // ===================== СТОЙКИ/ДЕЙСТВИЯ/ПРИКАЗЫ =====================
 enum StanceType { NONE, AGGRESSIVE, DEFENSIVE }
+// Стратегии боя (пассивы на весь бой, выбор перед боем)
+enum StrategyPlan { STANDARD, CAUTIOUS, AGGRESSIVE }
 enum PlayerAction { ATTACK, POTION_SELF, POTION_ALLY, STANCE_AGGR, STANCE_DEF }
 class RoundOrder { Integer focusEnemyIndexB = null; }
 
@@ -178,6 +200,10 @@ public class Main {
     // СЛОТЫ
     static final String SAVES_DIR = "saves";
     static final String INDEX_PATH = SAVES_DIR + "/index.json";
+
+    // Текущая стратегия на бой (применяется к Команде A)
+    static StrategyPlan CURRENT_STRATEGY = StrategyPlan.STANDARD;
+    static int CURRENT_STRATEGY_TIER = 0; // 0=нет, 1..3
 
     public static void main(String[] args) {
         Scanner in = new Scanner(System.in);
@@ -273,18 +299,19 @@ public class Main {
         }
         assignRotmeister(cs, in);
 
+        ensurePathGenerated(cs); // сразу сгенерируем первый маршрут
+
         boolean running = true;
         while (running) {
             System.out.println("\n=== День " + cs.day +
                     " | 💰 Gulden: " + cs.gulden + " | Thaler: " + cs.thaler + " | Ducat: " + cs.ducat +
                     " | Отряд живых: " + cs.aliveCount() + " ===");
             System.out.println(" 1) Лагерь / Магазин / Снаряжение");
-            System.out.println(" 2) Поход");
-            System.out.println(" 3) Следующий бой");
-            System.out.println(" 4) Сохранить кампанию (в слот)");
-            System.out.println(" 5) Загрузить кампанию (из списка слотов)");
+            System.out.println(" 2) Карта / пройти следующий узел");
+            System.out.println(" 3) Сохранить кампанию (в слот)");
+            System.out.println(" 4) Загрузить кампанию (из списка слотов)");
             System.out.println(" 0) Выйти в главное меню");
-            int pick = readInt(in, "Ваш выбор: ", 0, 5);
+            int pick = readInt(in, "Ваш выбор: ", 0, 4);
 
             if (pick == 0) {
                 System.out.println("Выход из кампании...");
@@ -292,14 +319,12 @@ public class Main {
             } else if (pick == 1) {
                 campMenu(in, cs);
             } else if (pick == 2) {
-                doExpedition(in, cs);
+                proceedOnMap(in, cs);
             } else if (pick == 3) {
-                doNextBattle(in, cs);
-            } else if (pick == 4) {
                 System.out.print("Имя сохранения кампании (Enter — по умолчанию): ");
                 String nm = in.nextLine().trim();
                 saveCampaignToNewSlot(nm, cs);
-            } else if (pick == 5) {
+            } else if (pick == 4) {
                 List<SaveMeta> metas = listSavesPrint();
                 if (!metas.isEmpty()) {
                     int num = readInt(in, "Номер слота: ", 1, metas.size());
@@ -313,6 +338,175 @@ public class Main {
             if (rotmeister != null) rotmeisterMenu(in, cs);
         }
         System.out.println("Кампания завершена.");
+    }
+
+    // ===== КАРТА: генерация/проход =====
+    static void ensurePathGenerated(CampaignState cs) {
+        if (cs.path != null && !cs.path.isEmpty()) return;
+        int len = 5 + (int)(Math.random() * 4); // 5..8
+        cs.path = generatePath(len);
+        cs.currentNodeIndex = 0;
+        System.out.println("\n🗺️ Сформирован маршрут из " + cs.path.size() + " узлов.");
+        printUpcoming(cs);
+    }
+
+    static List<MapNode> generatePath(int length) {
+        List<MapNode> nodes = new ArrayList<>();
+        Random rnd = new Random();
+        for (int i = 0; i < length; i++) {
+            NodeType type;
+            // распределение: бой ~55%, событие ~30%, рынок ~15%
+            int r = rnd.nextInt(100);
+            if (r < 55) type = NodeType.BATTLE;
+            else if (r < 85) type = NodeType.EVENT;
+            else type = NodeType.MARKET;
+
+            String desc = (type==NodeType.BATTLE?"Бой":
+                    (type==NodeType.MARKET?"Рынок":"Событие")) + " #" + (i+1);
+            nodes.add(new MapNode(i, type, desc));
+        }
+        // связи (линейно с редкими развилками)
+        for (int i = 0; i < length-1; i++) {
+            MapNode n = nodes.get(i);
+            n.next1 = i+1;
+            // на средних узлах с шансом 30% создать развилку на i+2 (если есть)
+            if (i+2 < length && Math.random() < 0.30) n.next2 = i+2;
+        }
+        // последний без next
+        return nodes;
+    }
+
+    static void printUpcoming(CampaignState cs) {
+        System.out.println("\n— Карта —");
+        for (int i = 0; i < cs.path.size(); i++) {
+            MapNode n = cs.path.get(i);
+            String cur = (i == cs.currentNodeIndex) ? "👉 " : "   ";
+            String branch = (n.next2 != null) ? " (развилка)" : "";
+            System.out.println(cur + "[" + n.id + "] " + n.desc + " — " + n.type + branch);
+        }
+    }
+
+    static void proceedOnMap(Scanner in, CampaignState cs) {
+        ensurePathGenerated(cs);
+        if (cs.currentNodeIndex >= cs.path.size()) {
+            System.out.println("Маршрут пройден. Генерирую новый акт...");
+            cs.day += 1;
+            cs.path = null;
+            ensurePathGenerated(cs);
+        }
+
+        // показать текущий и варианты следующего шага
+        MapNode cur = cs.path.get(cs.currentNodeIndex);
+        System.out.println("\n🧭 Текущий узел: [" + cur.id + "] " + cur.desc + " — " + cur.type);
+
+        // выполнить текущий, если ещё не выполнен (логика: входим — выполняем)
+        enterNode(in, cs, cur);
+
+        // перейти к выбору следующего
+        if (cur.next1 == null && cur.next2 == null) {
+            System.out.println("Дальше пути нет. Акт завершён.");
+            cs.day += 1;
+            cs.path = null;
+            ensurePathGenerated(cs);
+            return;
+        }
+
+        // если есть развилка
+        int nextIdx;
+        if (cur.next2 != null) {
+            MapNode n1 = cs.path.get(cur.next1);
+            MapNode n2 = cs.path.get(cur.next2);
+            System.out.println("Выберите направление:");
+            System.out.println(" 1) [" + n1.id + "] " + n1.type + " — " + n1.desc);
+            System.out.println(" 2) [" + n2.id + "] " + n2.type + " — " + n2.desc);
+            int pick = readInt(in, "Ваш выбор (1-2): ", 1, 2);
+            nextIdx = (pick == 1) ? cur.next1 : cur.next2;
+        } else {
+            nextIdx = cur.next1;
+            System.out.println("Дальше по пути → узел [" + nextIdx + "]");
+        }
+
+        cs.currentNodeIndex = nextIdx;
+        printUpcoming(cs);
+    }
+
+    static void enterNode(Scanner in, CampaignState cs, MapNode n) {
+        switch (n.type) {
+            case BATTLE -> {
+                doNextBattle(in, cs);
+            }
+            case MARKET -> {
+                System.out.println("\n🛒 Узел Рынок: заходим на рынок лагеря.");
+                marketMenu(in, cs);
+                // день увеличивать не будем — день идёт за бой/акт
+            }
+            case EVENT -> {
+                System.out.println("\n📜 Узел Событие: происходит случайное событие.");
+                runRandomEvent(in, cs);
+            }
+        }
+    }
+
+    // Примеры событий риск/награда (минимум)
+    static void runRandomEvent(Scanner in, CampaignState cs) {
+        int roll = (int)(Math.random()*3);
+        switch (roll) {
+            case 0 -> eventMysteriousTrader(in, cs);
+            case 1 -> eventAbandonedCart(in, cs);
+            default -> eventCheapRecruit(in, cs);
+        }
+    }
+    static void eventMysteriousTrader(Scanner in, CampaignState cs) {
+        System.out.println("«Таинственный торговец» предлагает сделку: заплатить 12 gulden за шанс получить 1 ducat.");
+        System.out.println(" 1) Заплатить 12 gulden\n 2) Отказаться");
+        int pick = readInt(in, "Ваш выбор: ", 1, 2);
+        if (pick == 1) {
+            if (cs.gulden < 12) { System.out.println("Денег не хватает. Торговец уходит."); return; }
+            cs.gulden -= 12;
+            if (Math.random() < 0.5) { cs.ducat += 1; System.out.println("Удача! Получен 1 ducat."); }
+            else System.out.println("Обман! Ничего не получили.");
+        } else {
+            System.out.println("Вы отказались. Ничего не произошло.");
+        }
+    }
+    static void eventAbandonedCart(Scanner in, CampaignState cs) {
+        System.out.println("«Заброшенный фургон»: можно обыскать (риск урона) или пройти мимо.");
+        System.out.println(" 1) Обыскать\n 2) Пройти мимо");
+        int pick = readInt(in, "Ваш выбор: ", 1, 2);
+        if (pick == 2) { System.out.println("Вы прошли мимо."); return; }
+
+        // риск
+        if (Math.random() < 0.5) {
+            int found = 8 + (int)(Math.random()*9); // 8..16
+            cs.gulden += found;
+            System.out.println("Нашли мешочек: +" + found + " gulden!");
+        } else {
+            // кому-то больно
+            int idx = -1;
+            for (int i = 0; i < cs.roster.length; i++) if (cs.roster[i] != null && cs.roster[i].hp > 0) { idx = i; break; }
+            if (idx == -1) { System.out.println("Никто не пострадал (отряд пуст)."); return; }
+            Warrior w = cs.roster[idx];
+            int dmg = 3 + (int)(Math.random()*4); // 3..6
+            w.hp = Math.max(1, w.hp - dmg);
+            System.out.println(w.label() + " порезался при осмотре: -" + dmg + " hp (минимум 1).");
+        }
+    }
+    static void eventCheapRecruit(Scanner in, CampaignState cs) {
+        System.out.println("«Дешёвый наёмник»: предлагают воина со скидкой. Взять в отряд?");
+        Warrior cand = Warrior.randomWarrior();
+        cand.teamTag = "[A]";
+        int costG = 10;
+        System.out.println("Кандидат: " + cand.label() + " (hp=" + cand.hp + ", atk=" + cand.attack + ", arm=" + cand.armor + ", weap=" + cand.weapon + ") — цена: " + costG + " G");
+        System.out.println(" 1) Нанять\n 2) Отказаться");
+        int pick = readInt(in, "Ваш выбор: ", 1, 2);
+        if (pick == 2) { System.out.println("Отказались от найма."); return; }
+        if (cs.gulden < costG) { System.out.println("Недостаточно gulden."); return; }
+        int slot = findEmptyRosterIndex(cs.roster);
+        if (slot == -1) { System.out.println("В отряде нет свободного слота."); return; }
+        cs.gulden -= costG;
+        cand.isRecruited = true;
+        cs.roster[slot] = cand;
+        System.out.println("Нанят в слот " + (slot+1) + ". Остаток: G=" + cs.gulden);
     }
 
     // Назначение ротмистра
@@ -413,7 +607,7 @@ public class Main {
         Warrior warrior; int costG; int costT; int costD;
         RecruitCandidate(Warrior w, int g, int t, int d) { this.warrior=w; this.costG=g; this.costT=t; this.costD=d; }
         String label() {
-            return warrior.name + " (hp=" + warrior.hp + ", atk=" + warrior.attack + ", arm=" + warrior.armor + 
+            return warrior.name + " (hp=" + warrior.hp + ", atk=" + warrior.attack + ", arm=" + warrior.armor +
                     ", role=" + warrior.role + ", weap=" + warrior.weapon + ") — цена: " + costG + "G/" + costT + "T/" + costD + "D";
         }
     }
@@ -653,9 +847,7 @@ public class Main {
                     System.out.println("Выберите оружие: 1) PIKE  2) AXE  3) SWORD_BUCKLER  (внимание: бонусы оружия применяются один раз)");
                     int wPick = readInt(in, "Ваш выбор (1-3): ", 1, 3);
                     Weapon newW = (wPick==1)?Weapon.PIKE : (wPick==2)?Weapon.AXE : Weapon.SWORD_BUCKLER;
-                    // Простое правило безопасности: заменяем только если текущее базовое/NONE
                     if (target.weapon == Weapon.NONE || target.weapon == Weapon.PIKE || target.weapon == Weapon.AXE || target.weapon == Weapon.SWORD_BUCKLER) {
-                        // Сбрасывать прошлые бонусы мы не умеем в MVP, поэтому меняем только в рамках "базовое на базовое/none"
                         target.weapon = newW;
                         newW.applyTo(target);
                         cs.stashBasicWeapons--;
@@ -669,7 +861,7 @@ public class Main {
     }
 
     static void doExpedition(Scanner in, CampaignState cs) {
-        System.out.println("\n— ПОХОД —");
+        // (не используется в версии с картой, оставлено на будущее)
         double roll = Math.random();
         if (roll < 0.5) {
             int found = 10 + (int)(Math.random() * 11); // 10..20
@@ -692,7 +884,7 @@ public class Main {
         return active.toArray(new Warrior[0]);
     }
 
-    static void syncBackToRoster(Warrior[] roster, Warrior[] activeTeam) {
+    static void syncBackToRoster() {
         // Ничего не делаем: объекты Warrior в активной команде — те же ссылки, что и в roster.
     }
 
@@ -714,9 +906,37 @@ public class Main {
         printTeam("Команда A (ваш отряд)", teamA);
         printTeam("Команда B (противник)", teamB);
 
+        // Определим уровень Ротмистра
+        Warrior rot = null; for (Warrior w : cs.roster) if (w != null && w.isRotmeister) { rot = w; break; }
+        int rotLevel = (rot == null) ? 1 : rot.level;
+
+        // L4+: Скаутинг (подсказка архетипа врага)
+        if (rotLevel >= 4) {
+            System.out.print("Активировать Скаутинг перед выбором стратегии? (y/n, default n): ");
+            String sAns = in.nextLine().trim().toLowerCase();
+            if (sAns.equals("y")) {
+                scoutingHint(teamB);
+            }
+        }
+
+        // L6+: Выбор стратегии на бой
+        CURRENT_STRATEGY = StrategyPlan.STANDARD; CURRENT_STRATEGY_TIER = 0;
+        if (rotLevel >= 6) {
+            int tier = (rotLevel >= 10) ? 3 : (rotLevel >= 8) ? 2 : 1;
+            System.out.println("\nВыбор стратегии на бой (уровень Ротмистра: " + rotLevel + "):");
+            System.out.println(" 1) Стандарт (без изменений)");
+            System.out.println(" 2) Осторожная (версия " + tier + ")");
+            System.out.println(" 3) Агрессивная (версия " + tier + ")");
+            int stratPick = readInt(in, "Ваш выбор (1-3): ", 1, 3);
+            if (stratPick == 2) { CURRENT_STRATEGY = StrategyPlan.CAUTIOUS; CURRENT_STRATEGY_TIER = tier; }
+            else if (stratPick == 3) { CURRENT_STRATEGY = StrategyPlan.AGGRESSIVE; CURRENT_STRATEGY_TIER = tier; }
+            else { CURRENT_STRATEGY = StrategyPlan.STANDARD; CURRENT_STRATEGY_TIER = 0; }
+            System.out.println("Стратегия установлена: " + CURRENT_STRATEGY + (CURRENT_STRATEGY==StrategyPlan.STANDARD?"":" (Tier " + CURRENT_STRATEGY_TIER + ")"));
+        }
+
         int round = 1;
         while (teamAlive(teamA) && teamAlive(teamB)) {
-            RoundOrder ro = promptRoundOrder(in, teamA, teamB);
+            RoundOrder ro = promptRoundOrder(in, teamB);
 
             if (cs.focusTarget) {
                 Integer idx = firstAliveIndex1Based(teamB);
@@ -753,11 +973,26 @@ public class Main {
             System.out.println("Потери: -" + loss + " gulden. Осталось: " + cs.gulden);
         }
 
-        syncBackToRoster(cs.roster, teamA);
+        syncBackToRoster();
         cs.day += 1;
         cs.focusTarget = false; // Сброс фокуса
         // Сброс временных эффектов для отряда
-        for (Warrior w : cs.roster) if (w != null) { w.tempArmorBonus = 0; w.battleCryBonus = false; }
+        for (Warrior w : cs.roster) if (w != null) { w.tempArmorBonus = 0; w.battleCryBonus = false; w.battleAttackCount = 0; }
+        // Сброс стратегии
+        CURRENT_STRATEGY = StrategyPlan.STANDARD; CURRENT_STRATEGY_TIER = 0;
+    }
+
+    static void scoutingHint(Warrior[] enemyTeam) {
+        int totalArmor = 0, totalPierce = 0; double avgCrit = 0.0; int count = 0;
+        for (Warrior w : enemyTeam) if (w != null) { totalArmor += (w.armor + w.tempArmorBonus); totalPierce += w.pierce; avgCrit += w.critChance; count++; }
+        if (count == 0) { System.out.println("Скаутинг: противник не обнаружен."); return; }
+        double aArmor = (double) totalArmor / count;
+        double aPierce = (double) totalPierce / count;
+        avgCrit /= count;
+        System.out.println("Скаутинг: средняя броня=" + String.format(Locale.ROOT, "%.2f", aArmor) + ", средний pierce=" + String.format(Locale.ROOT, "%.2f", aPierce) + ", средний crit=" + String.format(Locale.ROOT, "%.0f%%", avgCrit*100));
+        if (avgCrit >= 0.18) System.out.println("Подсказка: враг критоугрожающий — Осторожная стратегия поможет.");
+        else if (aArmor >= 2.0) System.out.println("Подсказка: у врага много брони — Агрессивная стратегия поможет давить через pierce.");
+        else System.out.println("Подсказка: состав смешанный — Стандарт или на ваше усмотрение.");
     }
 
     static void applyVictoryLoot(CampaignState cs, int teamSize) {
@@ -780,6 +1015,37 @@ public class Main {
     }
 
     // ===================== КОМАНДНАЯ БИТВА =====================
+    static void playBattleLoop(Scanner in, Warrior[] teamA, Warrior[] teamB, int startRound) {
+        int round = startRound;
+        while (teamAlive(teamA) && teamAlive(teamB)) {
+            RoundOrder ro = promptRoundOrder(in, teamB);
+            if (ro.focusEnemyIndexB != null)
+                System.out.println("🎯 Приказ: фокус на B[" + ro.focusEnemyIndexB + "]");
+
+            playTeamRoundRandom(in, round, teamA, teamB, ro);
+
+            if (SHOW_ROUND_SUMMARY) {
+                printTeam("Сводка: Команда A", teamA);
+                printTeam("Сводка: Команда B", teamB);
+                log(BRIEF, teamMiniSummary(teamA, teamB));
+            }
+
+            System.out.print("[S] сохранить в СЛОТ, [Enter] продолжить: ");
+            String hot = in.nextLine().trim().toLowerCase();
+            if (hot.equals("s")) {
+                System.out.print("Имя сохранения (Enter — по умолчанию): ");
+                String nm = in.nextLine().trim();
+                saveGameToNewSlot(nm, teamA, teamB, round + 1);
+            }
+
+            round++;
+        }
+
+        System.out.println();
+        System.out.println(teamAlive(teamA) ? "🏆 Победила команда A!" : "🏆 Победила команда B!");
+        System.out.println("[Командная битва] Завершена.");
+    }
+
     static void runTeamBattle(Scanner in) {
         System.out.println("\n[Командная битва] Старт.");
 
@@ -813,34 +1079,7 @@ public class Main {
             saveGameToNewSlot(nm, teamA, teamB, 1);
         }
 
-        int round = 1;
-        while (teamAlive(teamA) && teamAlive(teamB)) {
-            RoundOrder ro = promptRoundOrder(in, teamA, teamB);
-            if (ro.focusEnemyIndexB != null)
-                System.out.println("🎯 Приказ: фокус на B[" + ro.focusEnemyIndexB + "]");
-
-            playTeamRoundRandom(in, round, teamA, teamB, ro);
-
-            if (SHOW_ROUND_SUMMARY) {
-                printTeam("Сводка: Команда A", teamA);
-                printTeam("Сводка: Команда B", teamB);
-                log(BRIEF, teamMiniSummary(teamA, teamB));
-            }
-
-            System.out.print("[S] сохранить в СЛОТ, [Enter] продолжить: ");
-            String hot = in.nextLine().trim().toLowerCase();
-            if (hot.equals("s")) {
-                System.out.print("Имя сохранения (Enter — по умолчанию): ");
-                String nm = in.nextLine().trim();
-                saveGameToNewSlot(nm, teamA, teamB, round + 1);
-            }
-
-            round++;
-        }
-
-        System.out.println();
-        System.out.println(teamAlive(teamA) ? "🏆 Победила команда A!" : "🏆 Победила команда B!");
-        System.out.println("[Командная битва] Завершена.");
+        playBattleLoop(in, teamA, teamB, 1);
     }
 
     static void runTeamBattleLoaded(Scanner in, SaveGame sg) {
@@ -854,33 +1093,7 @@ public class Main {
         printTeam("Команда A (загружено)", teamA);
         printTeam("Команда B (загружено)", teamB);
 
-        while (teamAlive(teamA) && teamAlive(teamB)) {
-            RoundOrder ro = promptRoundOrder(in, teamA, teamB);
-            if (ro.focusEnemyIndexB != null)
-                System.out.println("🎯 Приказ: фокус на B[" + ro.focusEnemyIndexB + "]");
-
-            playTeamRoundRandom(in, round, teamA, teamB, ro);
-
-            if (SHOW_ROUND_SUMMARY) {
-                printTeam("Сводка: Команда A", teamA);
-                printTeam("Сводка: Команда B", teamB);
-                log(BRIEF, teamMiniSummary(teamA, teamB));
-            }
-
-            System.out.print("[S] сохранить в СЛОТ, [Enter] продолжить: ");
-            String hot = in.nextLine().trim().toLowerCase();
-            if (hot.equals("s")) {
-                System.out.print("Имя сохранения (Enter — по умолчанию): ");
-                String nm = in.nextLine().trim();
-                saveGameToNewSlot(nm, teamA, teamB, round + 1);
-            }
-
-            round++;
-        }
-
-        System.out.println();
-        System.out.println(teamAlive(teamA) ? "🏆 Победила команда A!" : "🏆 Победила команда B!");
-        System.out.println("[Командная битва] Завершена.");
+        playBattleLoop(in, teamA, teamB, round);
     }
 
     // ===================== ИГРОВАЯ ЛОГИКА БОЯ =====================
@@ -910,7 +1123,7 @@ public class Main {
     static double  DEF_BLOCK_DELTA(Role r) { return 0.05 + (r==Role.SUPPORT ? 0.02 : 0.0); }
     static double  DEF_DODGE_DELTA(Role r) { return 0.05 + (r==Role.SKIRMISHER ? 0.02 : 0.0); }
 
-    static RoundOrder promptRoundOrder(Scanner in, Warrior[] teamA, Warrior[] teamB) {
+    static RoundOrder promptRoundOrder(Scanner in, Warrior[] teamB) {
         RoundOrder ro = new RoundOrder();
         System.out.println("\nПриказ раунда:");
         System.out.println(" 1) Без приказа");
@@ -932,7 +1145,7 @@ public class Main {
         boolean isPlayerSide = (attacker.teamTag != null && attacker.teamTag.contains("[A]"));
 
         if (isPlayerSide) {
-            PlayerAction act = promptPlayerAction(in, attacker, allyTeam, enemyTeam);
+            PlayerAction act = promptPlayerAction(in, attacker);
             switch (act) {
                 case POTION_SELF: {
                     if (attacker.potions > 0 && attacker.hp < attacker.maxHp) attacker.usePotion();
@@ -978,7 +1191,7 @@ public class Main {
         if (target != null) attacker.attack(target);
     }
 
-    static PlayerAction promptPlayerAction(Scanner in, Warrior attacker, Warrior[] allyTeam, Warrior[] enemyTeam) {
+    static PlayerAction promptPlayerAction(Scanner in, Warrior attacker) {
         System.out.println("\nХод " + attacker.label() + ". Выберите действие:");
         System.out.println(" 1) Атаковать");
         System.out.println(" 2) Выпить зелье (сам)");
@@ -986,14 +1199,14 @@ public class Main {
         System.out.println(" 4) Встать в атакующую стойку (эффект на СЛЕД. ход)");
         System.out.println(" 5) Встать в защитную стойку (эффект до след. хода)");
         int pick = readInt(in, "Ваш выбор (1-5): ", 1, 5);
-        switch (pick) {
-            case 1: return PlayerAction.ATTACK;
-            case 2: return PlayerAction.POTION_SELF;
-            case 3: return PlayerAction.POTION_ALLY;
-            case 4: return PlayerAction.STANCE_AGGR;
-            case 5: return PlayerAction.STANCE_DEF;
-            default: return PlayerAction.ATTACK;
-        }
+        return switch (pick) {
+            case 1 -> PlayerAction.ATTACK;
+            case 2 -> PlayerAction.POTION_SELF;
+            case 3 -> PlayerAction.POTION_ALLY;
+            case 4 -> PlayerAction.STANCE_AGGR;
+            case 5 -> PlayerAction.STANCE_DEF;
+            default -> PlayerAction.ATTACK;
+        };
     }
 
     private static int selectAliveAllyIndex(Scanner in, Warrior[] allyTeam) {
@@ -1012,16 +1225,6 @@ public class Main {
     }
 
     // ===================== JSON (старые быстрые сейвы) =====================
-    static void saveGameJson(String path, Warrior[] teamA, Warrior[] teamB, int round) {
-        try {
-            com.google.gson.Gson gson = new com.google.gson.GsonBuilder().setPrettyPrinting().create();
-            SaveGame sg = new SaveGame(teamA, teamB, round, LOG_LEVEL, COLOR);
-            java.nio.file.Files.writeString(java.nio.file.Path.of(path), gson.toJson(sg));
-            System.out.println("✅ Сохранение выполнено: " + path);
-        } catch (Exception e) {
-            System.out.println("❌ Ошибка сохранения: " + e.getMessage());
-        }
-    }
 
     static SaveGame loadGameJson(String path) {
         try {
@@ -1128,9 +1331,13 @@ public class Main {
     }
 
     static SaveGame loadSaveByNumber(int number) {
+        return loadSaveByNumber(number, "слота");
+    }
+
+    static SaveGame loadSaveByNumber(int number, String slotType) {
         List<SaveMeta> metas = readSaveIndex();
         if (number < 1 || number > metas.size()) {
-            System.out.println("Неверный номер слота.");
+            System.out.println("Неверный номер " + slotType + ".");
             return null;
         }
         SaveMeta m = metas.get(number - 1);
@@ -1141,7 +1348,7 @@ public class Main {
             System.out.println("✅ Загружено: [" + m.id + "] \"" + sg.saveName + "\" (" + fmtTime(sg.savedAtEpochMillis) + ")");
             return sg;
         } catch (Exception e) {
-            System.out.println("❌ Ошибка загрузки из слота: " + e.getMessage());
+            System.out.println("❌ Ошибка загрузки из " + slotType + ": " + e.getMessage());
             return null;
         }
     }
@@ -1171,27 +1378,16 @@ public class Main {
     }
 
     static CampaignState loadCampaignByNumber(int number) {
-        List<SaveMeta> metas = readSaveIndex();
-        if (number < 1 || number > metas.size()) {
-            System.out.println("Неверный номер слота.");
+        SaveGame sg = loadSaveByNumber(number, "слота кампании");
+        if (sg == null) return null;
+
+        if (sg.campaign == null) {
+            System.out.println("⚠️ В выбранном слоте нет кампании (это сейв боя).");
             return null;
         }
-        SaveMeta m = metas.get(number - 1);
-        try {
-            String json = java.nio.file.Files.readString(java.nio.file.Path.of(m.path));
-            com.google.gson.Gson gson = new com.google.gson.Gson();
-            SaveGame sg = gson.fromJson(json, SaveGame.class);
-            if (sg.campaign == null) {
-                System.out.println("⚠️ В выбранном слоте нет кампании (это сейв боя).");
-                return null;
-            }
-            for (Warrior w : sg.campaign.roster) if (w != null) { w.teamTag = "[A]"; w.nextTurnStance = StanceType.NONE; w.defenseStance = StanceType.NONE; }
-            System.out.println("✅ Кампания загружена: [" + m.id + "] \"" + sg.saveName + "\" (" + fmtTime(sg.savedAtEpochMillis) + ")");
-            return sg.campaign;
-        } catch (Exception e) {
-            System.out.println("❌ Ошибка загрузки кампании: " + e.getMessage());
-            return null;
-        }
+        for (Warrior w : sg.campaign.roster) if (w != null) { w.teamTag = "[A]"; w.nextTurnStance = StanceType.NONE; w.defenseStance = StanceType.NONE; }
+        System.out.println("✅ Кампания загружена: [" + sg.saveName + "]");
+        return sg.campaign;
     }
 
     // ===================== ВСПОМОГАТЕЛЬНОЕ =====================
@@ -1286,19 +1482,19 @@ public class Main {
     }
 
     static Warrior createWarrior(int choice, Scanner in) {
-        switch (choice) {
-            case 1: {
+        return switch (choice) {
+            case 1 -> {
                 // Именованный ландскнехт
-                return Warrior.randomWarriorWithNameExclusions(new HashSet<>() {{ add("__force_type_0"); }});
+                yield Warrior.randomWarriorWithNameExclusions(new HashSet<>() {{ add("__force_type_0"); }});
             }
-            case 2: {
+            case 2 -> {
                 // Именованный швейцарец
-                return Warrior.randomWarriorWithNameExclusions(new HashSet<>() {{ add("__force_type_1"); }});
+                yield Warrior.randomWarriorWithNameExclusions(new HashSet<>() {{ add("__force_type_1"); }});
             }
-            case 3: return Warrior.randomWarrior();
-            case 4: return pickFromGeneratedListLoop(in);
-            default: return new Warrior("Landsknecht", 30, 5);
-        }
+            case 3 -> Warrior.randomWarrior();
+            case 4 -> pickFromGeneratedListLoop(in);
+            default -> new Warrior("Landsknecht", 30, 5);
+        };
     }
 
     static Warrior pickFromGeneratedListLoop(Scanner in) {
@@ -1392,6 +1588,9 @@ class Warrior {
     StanceType nextTurnStance = StanceType.NONE;
     StanceType defenseStance  = StanceType.NONE;
 
+    // Счётчик ударов в текущем бою (для стратегии)
+    int battleAttackCount = 0;
+
     Warrior(String name, int hp, int attack) {
         this.name = name; this.hp = hp; this.maxHp = hp; this.attack = attack;
     }
@@ -1399,6 +1598,8 @@ class Warrior {
     String label() { return (teamTag == null || teamTag.isEmpty() ? "" : teamTag + " ") + name; }
 
     // XP/Level
+    private static final int BATTLE_VICTORY_EXP = 50;
+
     void gainExperience(int amount) {
         experience += amount;
         System.out.println(name + " получил " + amount + " опыта! (Всего: " + experience + "/" + (100 * level) + ")");
@@ -1421,7 +1622,7 @@ class Warrior {
         pendingLevelUps++; // Добавляем выбор для игрока
     }
 
-    void onBattleVictory() { gainExperience(50); }
+    void onBattleVictory() { gainExperience(BATTLE_VICTORY_EXP); }
 
     void setRotmeister() {
         if (!isRotmeister) {
@@ -1436,47 +1637,47 @@ class Warrior {
 
     // ===== Пулы исторических/правдоподобных имён по типам =====
     static final String[] NAMES_LANDSKNECHT = new String[]{
-        "Georg von Frundsberg","Kaspar von Frundsberg","Sebastian Schertlin von Burtenbach","Paul Dolnstein","Peter Hagendorf",
-        "Götz von Berlichingen","Franz von Sickingen","Hans Katzianer","Veit von Frundsberg","Sebastian Vogelsberger",
-        "Hans Steinmetz","Jörg Eisenfaust","Ulrich Donner","Matthias Sturm","Jakob Reißer","Wolfgang Hackl","Konrad Spieß",
-        "Klaus Messer","Dieter Eisenhut","Friedrich Grothmann","Otto Sporer","Albrecht Falkenstein","Martin Grenzhammer",
-        "Heinrich Rotbart","Peter Doppelklinge","Ludwig Lange","Bernhard Krause","Niklas Hirt","Till Bleichschmied","Ruprecht Kalkstein"
+            "Georg von Frundsberg","Kaspar von Frundsberg","Sebastian Schertlin von Burtenbach","Paul Dolnstein","Peter Hagendorf",
+            "Götz von Berlichingen","Franz von Sickingen","Hans Katzianer","Veit von Frundsberg","Sebastian Vogelsberger",
+            "Hans Steinmetz","Jörg Eisenfaust","Ulrich Donner","Matthias Sturm","Jakob Reißer","Wolfgang Hackl","Konrad Spieß",
+            "Klaus Messer","Dieter Eisenhut","Friedrich Grothmann","Otto Sporer","Albrecht Falkenstein","Martin Grenzhammer",
+            "Heinrich Rotbart","Peter Doppelklinge","Ludwig Lange","Bernhard Krause","Niklas Hirt","Till Bleichschmied","Ruprecht Kalkstein"
     };
     static final String[] NAMES_SWISS = new String[]{
-        "Hans von Hallwyl","Peter von Luzern","Claus von Uri","Jakob von Zürich",
-        "Ueli Gerber","Beat Imhof","Jörg Tukker","Werner Tanner","Reto Landolt","Konrad Gmür","Heinz Rüttimann","Peterli Schmid",
-        "Niklaus Aebischer","Matthias Heller","Rudolf Vögeli","Jonas Bärtschi","Christoph Zaugg","Leonhart Vogt","Ulrich Fäh",
-        "Jost Amstalden","Werner Gwerder","Melchior Keller","Hansjörg Brunner","Sebastian Künzli","Fritz Oberholzer","Jakob Gessler"
+            "Hans von Hallwyl","Peter von Luzern","Claus von Uri","Jakob von Zürich",
+            "Ueli Gerber","Beat Imhof","Jörg Tukker","Werner Tanner","Reto Landolt","Konrad Gmür","Heinz Rüttimанn","Peterli Schmid",
+            "Niklaus Aebischer","Matthias Heller","Rudolf Vögeli","Jonas Bärtschi","Christoph Zaugg","Leonhart Vogt","Ulrich Fäh",
+            "Jost Amstalden","Werner Gwerder","Melchior Keller","Hansjörg Brunner","Sebastian Künzli","Fritz Oberholzer","Jakob Gessler"
     };
     static final String[] NAMES_SPANIARD = new String[]{
-        "Gonzalo Fernández de Córdoba","Pedro Navarro","Antonio de Leyva","Diego García de Paredes","Hernán Cortés","Francisco Pizarro",
-        "Pedro de Alvarado","Íñigo López de Loyola","Rodrigo de Mendoza","Martín de Ayala","Alonso de Vera","Juan de Carvajal",
-        "Diego de Zúñiga","Baltasar de Rojas","Lope de Villalobos","Esteban de Salazar","Nuño de Cárdenas","Hernando de Sotomayor",
-        "Pedro de Tapia","Gaspar de Sandoval","Álvaro de Olivares","Gil de Arriaga","Ramiro de Quintana","Domingo de Peñalosa",
-        "Tomás de Barrientos","Luis de Arévalo","Fernando de Valdés","Jaime de Santángel","Sancho de Baeza","Diego de Haro"
+            "Gonzalo Fernández de Córdoba","Pedro Navarro","Antonio de Leyva","Diego García de Paredes","Hernán Cortés","Francisco Pizarro",
+            "Pedro de Alvarado","Íñigo López de Loyola","Rodrigo de Mendoza","Martín de Ayala","Alonso de Vera","Juan de Carvajal",
+            "Diego de Zúñiga","Baltasar de Rojas","Lope de Villalobos","Esteban de Salazar","Nuño de Cárdenas","Hernando de Sotomayor",
+            "Pedro de Tapia","Gaspar de Sandoval","Álvaro de Olivares","Gil de Arriaga","Ramiro de Quintana","Domingo de Peñalosa",
+            "Tomás de Barrientos","Luis de Arévalo","Fernando de Valdés","Jaime de Santángel","Sancho de Baeza","Diego de Haro"
     };
     static final String[] NAMES_GALLOWGLASS = new String[]{
-        "Domhnall Mac Suibhne","Niall Óg Mac Suibhne","Maolmhuire Mac Suibhne Fánad","Eóin Dubh Mac Suibhne na dTuath",
-        "Alasdair Mac Domhnaill","Somhairle Mac Domhnaill","Aodh Mac Cába","Seán Mac Síthigh",
-        "Ruaidhrí Mac Suibhne","Tadhg Ruadh Mac Suibhne","Cormac Mac Suibhne Boghaineach","Conall Mac Suibhne","Brian Mac Domhnaill",
-        "Aonghus Mac Domhnaill","Lachlann Mac Domhnaill","Alasdair Óg Mac Domhnaill","Donnchadh Mac Dubhghaill","Niall Mac Dubhghaill",
-        "Eóghan Mac Ruaidhrí","Toirdhealbhach Mac Ruaidhrí","Eachann Mac Gille Eóin","Fearghal Mac Gille Eóin","Cathal Mac Néill",
-        "Áedh Mac Néill","Turlough Mac Cába","Diarmait Mac Cába","Domhnall Mac Síthigh","Cian Mac Síthigh","Seamus Mac Dómhnaill Ghallóglaigh","Murchadh Mac Leòid"
+            "Domhnall Mac Suibhne","Niall Óg Mac Suibhne","Maolmhuire Mac Suibhne Fánad","Eóin Dubh Mac Suibhne na dTuath",
+            "Alasdair Mac Domhnaill","Somhairle Mac Domhnaill","Aodh Mac Cába","Seán Mac Síthigh",
+            "Ruaidhrí Mac Suibhne","Tadhg Ruadh Mac Suibhne","Cormac Mac Suibhne Boghaineach","Conall Mac Suibhne","Brian Mac Domhnaill",
+            "Aonghus Mac Domhnaill","Lachlann Mac Domhnaill","Alasdair Óг Mac Domhnaill","Donnchadh Mac Dubhghaill","Niall Mac Dubhghaill",
+            "Eóghan Mac Ruaidhrí","Toirdhealbhach Mac Ruaidhrí","Eachann Mac Gille Eóin","Fearghal Mac Gille Eóin","Cathal Mac Néill",
+            "Áedh Mac Néill","Turlough Mac Cába","Diarmait Mac Cába","Domhnall Mac Síthigh","Cian Mac Síthigh","Seamus Mac Dómhnaill Ghallóglaigh","Murchadh Mac Leòid"
     };
     static final String[] NAMES_REITER = new String[]{
-        "Lazarus von Schwendi","Ernst von Mansfeld","Gottfried Heinrich von Pappenheim","Johann von Nassau","Maurice",
-        "Heinrich von Schönberg","Wolf von Wallenrodt","Hans von Bredow","Wilhelm von Rantzau","Friedrich von Hohenlohe",
-        "Georg von Solms","Albrecht von Witzleben","Kaspar von Wartensleben","Sebastian von Arnim","Ulrich von Wedel","Joachim von Einsiedel",
-        "Christoph von der Goltz","Maximilian von Löwenstein","Eitel von Königsmark","Veit von Trotha","Konrad von Plauen",
-        "Sigismund von Düring","Balthasar von Schönfeld","Lambert von Krosigk","Ruprecht von Eberstein","Dietrich von Pentz",
-        "Hartmann von Lüttichau","Jörg Eisenhart","Hans Schwarzreiter","Klaus Stahlreuter"
+            "Lazarus von Schwendi","Ernst von Mansfeld","Gottfried Heinrich von Pappenheim","Johann von Nassau","Maurice",
+            "Heinrich von Schönberg","Wolf von Wallenrodt","Hans von Bredow","Wilhelm von Rantzau","Friedrich von Hohenlohe",
+            "Georg von Solms","Albrecht von Witzleben","Kaspar von Wartensleben","Sebastian von Arnim","Ulrich von Wedel","Joachim von Einsiedel",
+            "Christoph von der Goltz","Maximilian von Löwenstein","Eitel von Königsmark","Veit von Trotha","Konrad von Plauen",
+            "Sigismund von Düring","Balthasar von Schönfeld","Lambert von Krosigk","Ruprecht von Eberstein","Dietrich von Pentz",
+            "Hartmann von Lüttichau","Jörg Eisenhart","Hans Schwarzreiter","Klaus Stahlreuter"
     };
     static final String[] NAMES_CONQUISTADOR = new String[]{
-        "Hernán Cortés","Francisco Pizarro","Pedro de Alvarado","Diego de Almagro","Vasco Núñez de Balboa","Pánfilo de Narváez",
-        "Pedro de Valdivia","Hernando de Soto","Alonso de Ojeda","Juan Ponce de León","Francisco de Orellana","Sebastián de Belalcázar",
-        "Álvar Núñez Cabeza de Vaca","Lope de Aguirre","Pedro Menéndez de Avilés","Martín de Ayala","Rodrigo de Barrientos",
-        "Gonzalo de Villalobos","Diego de Carvajal","Íñigo de Zorita","Baltasar de Sandoval","Cristóbal de Llerena","Nuño de Castañeda",
-        "Tomás de Arriaga","Juan de Zaldívar","Pedro de Mondragón","García López de Cárdenas","Alonso de Cárdenas","Miguel de Legazpi","Juan de Oñate"
+            "Hernán Cortés","Francisco Pizarro","Pedro de Alvarado","Diego de Almagro","Vasco Núñez de Balboa","Пánfilo de Narváez",
+            "Pedro de Valdivia","Hernando de Soto","Alonso de Ojeda","Juan Ponce de León","Francisco de Orellana","Sebastián de Belalcázar",
+            "Álvar Núñez Cabeza de Vaca","Lope de Aguirre","Pedro Menéndez de Avilés","Martín de Ayala","Rodrigo de Barrientos",
+            "Gonzalo de Villalobos","Diego de Carvajal","Íñigo de Zorita","Baltasar de Sandoval","Cristóbal de Llerena","Nuño de Castañeda",
+            "Tomás de Arriaga","Juan de Zaldívar","Pedro de Mondragón","García López de Cárденas","Alonso de Cárденас","Miguel de Legazpi","Juan de Oñate"
     };
 
     static Warrior randomWarriorWithNameExclusions(java.util.Set<String> used) {
@@ -1578,6 +1779,34 @@ class Warrior {
 
         damage += damageBonus;
 
+        // Стратегии
+        boolean attackerIsPlayer = (this.teamTag != null && this.teamTag.contains("[A]"));
+        boolean enemyIsPlayer = (enemy.teamTag != null && enemy.teamTag.contains("[A]"));
+        int extraPierce = 0;
+        double extraStunOnCrit = 0.0;
+        double outgoingDamageMultiplier = 1.0;     // штраф/бонус исходящего урона атакующего
+        double enemyIncomingMultiplier = 1.0;      // мод для входящего урона цели
+
+        if (attackerIsPlayer) {
+            if (Main.CURRENT_STRATEGY == StrategyPlan.AGGRESSIVE && Main.CURRENT_STRATEGY_TIER > 0) {
+                int tier = Main.CURRENT_STRATEGY_TIER;
+                int nextHitIndex = this.battleAttackCount + 1;
+                boolean grantPierce = (tier >= 3) || (tier == 2 && (nextHitIndex % 2 == 1)) || (tier == 1 && (nextHitIndex % 2 == 0));
+                if (grantPierce) extraPierce += 1;
+                extraStunOnCrit += (tier == 1 ? 0.05 : tier == 2 ? 0.07 : 0.10);
+            } else if (Main.CURRENT_STRATEGY == StrategyPlan.CAUTIOUS && Main.CURRENT_STRATEGY_TIER > 0) {
+                int tier = Main.CURRENT_STRATEGY_TIER;
+                outgoingDamageMultiplier *= (tier == 1 ? 0.95 : tier == 2 ? 0.93 : 0.91);
+            }
+        }
+
+        if (enemyIsPlayer) {
+            if (Main.CURRENT_STRATEGY == StrategyPlan.AGGRESSIVE && Main.CURRENT_STRATEGY_TIER > 0) {
+                int tier = Main.CURRENT_STRATEGY_TIER;
+                enemyIncomingMultiplier *= (tier == 1 ? 1.10 : tier == 2 ? 1.12 : 1.15);
+            }
+        }
+
         boolean crit = Math.random() < critChanceEff;
         if (crit) {
             damage *= 2;
@@ -1586,15 +1815,30 @@ class Warrior {
 
         int enemyArmor = enemy.armor + enemy.tempArmorBonus;
         if (enemy.defenseStance == StanceType.DEFENSIVE) enemyArmor += Main.DEF_ARMOR_BONUS(enemy.role);
-        int effectiveArmor = Math.max(0, enemyArmor - this.pierce);
+        int effectiveArmor = Math.max(0, enemyArmor - (this.pierce + extraPierce));
         int finalDamage = Math.max(1, damage - effectiveArmor);
-        int absorbed = damage - finalDamage;
+
+        // Снижение урона по цели под Осторожной стратегией (крит-минимайзер)
+        if (enemyIsPlayer && Main.CURRENT_STRATEGY == StrategyPlan.CAUTIOUS && Main.CURRENT_STRATEGY_TIER > 0) {
+            if (crit) {
+                int tier = Main.CURRENT_STRATEGY_TIER;
+                double reduce = (tier == 1 ? 0.15 : tier == 2 ? 0.20 : 0.25);
+                finalDamage = (int)Math.max(1, Math.floor(finalDamage * (1.0 - reduce)));
+            }
+        }
+
+        // Применяем мультипликаторы исходящего и входящего урона
+        finalDamage = (int)Math.max(1, Math.floor(finalDamage * outgoingDamageMultiplier));
+        finalDamage = (int)Math.max(1, Math.floor(finalDamage * enemyIncomingMultiplier));
+
+        int absorbed = damage - Math.max(1, finalDamage);
 
         enemy.hp -= finalDamage;
         if (enemy.hp <= 0) {
             enemy.hp = 0;
             Main.log(Main.BRIEF, "💀 " + enemy.label() + " умер! Убийца — " + label());
             fatigue++;
+            battleAttackCount++;
             Main.log(Main.NORMAL, "⚔️ " + label() + " ударил " + enemy.label() +
                     " на " + Main.c(Main.RED, String.valueOf(finalDamage)) + " урона" +
                     (absorbed > 0 ? " (🧱 броня поглотила " + absorbed + ")" : "") +
@@ -1603,12 +1847,13 @@ class Warrior {
             return;
         }
 
-        if (crit && Math.random() < stunOnCritEff) {
+        if (crit && Math.random() < Math.min(1.0, stunOnCritEff + extraStunOnCrit)) {
             enemy.stunned = true;
             Main.log(Main.NORMAL, "🔔 " + enemy.label() + " оглушён и пропустит следующий ход!");
         }
 
         fatigue++;
+        battleAttackCount++;
         Main.log(Main.NORMAL, "⚔️ " + label() + " ударил " + enemy.label() +
                 " на " + Main.c(Main.RED, String.valueOf(finalDamage)) + " урона" +
                 (absorbed > 0 ? " (🧱 броня поглотила " + absorbed + ")" : "") +
